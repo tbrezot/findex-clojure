@@ -1,0 +1,270 @@
+* Findex code specification
+
+** A user-interface: the index interface
+
+*** Example
+
+The following code snippet shows how to instantiate an object implementing
+Findex, how to index data under a list of keyword and how to retrieve this data
+using any keyword it is indexed under.
+
+#+name: demo
+#+begin_src clojure
+  (defn demo-findex
+
+    "Findex demo featuring:
+    - instantiating an Entry Table;
+    - instantiating a Chain Table;
+    - instantiating a Findex;
+    - indexing `uid` under both \"John\" and \"Doe\";
+    - searching the index for both \"John\" and \"Doe\"."
+
+    (let* ((entry-table (make-edx make-in-memory-backend))
+	   (chain-table (make-edx make-in-memory-backend))
+	   (index (Findex. key
+			   label
+			   entry-table
+			   chain-table))
+	   (uid 0x32f4))
+
+      (add index { uid ("John" "Doe") })
+      (eq? { "John" { uid }, "Doe" { uid } }
+	   (search index (list "John" "Doe")))))
+#+end_src
+
+*** Specification
+
+#+name: search signature
+#+begin_src clojure
+  (defprotocol Index
+    "Findex user interface."
+
+    (search
+      [keywords]
+      [keywords interrupt]
+      "Search the index for the given keywords. The optional filter is called at
+      each iteration with the values found (both data and new keywords). The
+      search stops when the interrupt returns true or no new keyword is found,
+      whichever happens first.")
+
+    (add [associations]
+      "Add the given associations to the index.")
+
+    (delete [associations]
+      "Delete the given associations from the index.")
+
+    (compact
+      [new-key new-label compact-frequency]
+      [new-key new-label compact-frequency data-filter]
+      "Compact the index using the new key and label. At least one of
+      them should differ from the current ones. The index is guaranteed
+      to be entirely compacted after 1/compact-frequency operations. The
+      optional filter is called with the indexed data read during the
+      compact operation. Only the data returned is indexed back into the
+      compacted index."))
+#+end_src
+
+**** Instantiating
+
+The instantiation function takes as arguments:
+- a *key*: a 16-byte long ~array~;
+- a *label*: an arbitrary public ~string~;
+- two *EDX* objects: the Entry and the Chain tables.
+
+***** TODO change parameter name `findexKey` to key
+
+***** TODO export a function `findex-keygen` to generate secure random key
+
+***** TODO use raw bytes for the keys in bindings
+
+***** TODO (?) keywords -> string ; data -> bytes
+
+**** Adding/deleting
+
+The ~Index~ interface provides primitives to ~add~ (resp. ~delete~)
+/associations/ to (resp. from) the index.
+
+An association links:
+- a value (a.k.a. ~IndexedValue~) that is either /data/ (usually a DB UID, a
+  link etc.), or a /keyword/ (arbitrary ~string~ (byte-string?));
+- to a /set of keywords/ (arbitrary ~string~ (byte-string?)).
+
+Associations should be passed as an iterable type. If this type is not a map,
+associations involving the same value can be passed several times. Associations
+need not to be unique.
+
+Findex guarantees that no association is added (resp. removed) several times
+during the same add (resp. delete) operation.
+
+***** TODO is the currently returned value necessary?
+
+**** Searching
+
+The Index interface provides a primitive to ~search~ for /keywords/ using an
+optional /interrupt/. It returns all the /data/ associated to these keywords
+(but not the associated keywords) that was found before the search was
+interrupted (if it was), or until no linked keyword was found.
+
+Keywords are arbitrary ~string~s (byte-strings?). They are passed to the index
+using an iterable type. They need to be unique, but no duplicated keyword is
+returned more than once.
+
+The associated data is returned as an iterable type containing the associations
+found.
+
+***** TODO what types should be used for the returned value ? for the data and keywords ?
+
+**** Compacting
+
+The ~Index~ interface provides a primitive to ~compact~ it using a new key, a
+new label and an optional /data-filter/.
+
+Upon error, no modification should be performed on the index. Upon success the
+new key and new label should be the one to use as the Findex key and label.
+
+The filter should take as argument an iterable on data and return an iterable on
+data.
+
+*** Cloudproof Rust
+
+Cloudproof Rust exposes the ~Instantiatedfindex~ wrapper type. This type exposes
+the same primitives as ~Findex~, but wraps the instantiation using a
+/configuration/ that allows choosing the backends used by the Entry Table and
+the Chain Table.
+
+The types exposed by the instantiation primitives should be primitive types.
+
+
+** A developer interface: the database interface
+
+*** Specification
+
+*** Cloudproof Rust
+
+* Findex code implementation
+** Discussion
+*** EDX
+**** Instantiation
+In Rust, the current EDX trait requires a value length (since a constant is used
+to enforce the use of fixed-length values). Two different types are used in
+order to encapsulate this information. This is too much overhead since
+Cloudproof Rust encapsulates this information and a backend implementor would
+need it anyway.
+**** Internals
+EDX should manage the conversion between tags and tokens.
+**** Interface
+- make ~tokenize~/~encrypt~/~decrypt~ internal helper functions?
+  the interface would then be "search/upsert/insert/delete"
+
+**** TODO use a unique type (find a name?).
+
+*** Cryptographic primitives
+
+The choice of the cryptographic primitives should be the responsibility of the
+EDX. Making these primitives an input would bring too much complexity.
+
+All Key derivation should be performed *once* (when instantiating the
+schemes). This means that each scheme should store its keys. This also means
+that a key should be provided when instantiating the schemes. The Findex wrapper
+could be in charge of generating a new random key if none was provided.
+
+**** TODO store keys in respective schemes
+**** TODO decide whether the RNG should be internalized.
+
+*** Memoization
+
+This technique consists in adding a cache a given function such that no
+computation is done the second time it is called with the same parameters. It
+is an aesthetic way to deal with repetition of expensive computations. In
+practice, it is not confirmed that is could help in the case of Findex.
+*** MM
+The multi-map is *not* a cryptographic module. As such, it handles tags and
+values only.
+** Findex Index
+** Findex Graph
+** Findex MM
+
+*** Instantiation
+
+The Findex EMM can be instantiated using a cryptographic key and two functions
+used to instantiate the Entry Table and the Chain Table.
+
+#+name: EMM instantition
+#+begin_src scheme
+  (define (make-emm key make-entry-table make-chain-table)
+    (let ((entry-table (make-entry-table (kdf key "Entry Table key")))
+	  (chain-table (make-chain-table (kdf key "Chain Table key"))))
+
+      (define (hash keyword)
+	;; Hash used to transform keywords into tags.
+	)
+
+      ;; The EMM API functions are implemented as closures
+      ;; that use the tables instantiated above.
+
+      (define (emm-search keywords)
+	;; Search the EMM for the given keywords.
+	)
+
+      (define (emm-upsert negate associations)
+	;; Upsert the given associations or their negated version to the EMM.
+	)
+
+      (define (emm-compact new-key)
+	;; Compacts the EMM using the given new key.
+	)
+
+      ;; The returned function dispatches on the requested operation.
+      (lambda (op args)
+	(cond ((eq? op 'search) (emm-search args))
+	      ((eq? op 'upsert) (emm-upsert args))
+	      ((eq? op 'compact) (emm-compact args))))))
+#+end_src
+
+*** Search
+
+In order to implement the EMM search function, the following helper function is
+used to abstract the particular EDX operations used to search the EDX for a tag.
+
+#+name: EDX search
+#+begin_src scheme
+  (define (edx-search edx tags)
+    ;; Helper function used to retrieve the values associated to the given tags
+    ;; from the given EDX.
+    (let* ((tag->token (map (lambda (tag) (edx 'tokenize tag))
+			    tags))
+	   (token->ciphertext (edx 'get (collect make-hash-table (values tag->token))))
+	   (token->value (map (lambda (token/ciphertext)
+				(assoc token (edx 'decrypt ciphertext token)))
+			      (token->ciphertext))))
+      (map (lambda (tag/token) (assoc tag (get token->value token))))))
+
+#+end_src
+
+The keywords searched are hashed. This hash is used as tag to search the Entry Table.
+
+#+name: MM search
+#+begin_src scheme
+  (define (emm-search keywords)
+    (let* ((kw->tag (map (lambda (kw) (assoc kw (hash kw)))
+			 kw-seq))
+	   (et-tag->entry (dx-search entry-table (values kw->tag)))
+	   (et-tag->ct-tags (map (lambda (tag/entry) (assoc tag (unroll entry)))
+				 et-tag->entry))
+	   (links (dx-search chain-table (flatten (values et-tag->ct-tags)))))
+
+      (let* ((kw->ct-tokens (map (lambda (kw/tag)
+				   (assoc kw (get tag->ct-tokens tag)))
+				 kw->tag))
+	     (kw->links (map (lambda (kw/ct-tokens)
+			       (assoc kw (map (lambda (tok) (get links tok)))))
+			     kw->ct-tokens)))
+	(collect
+	 make-hash-table
+	 (map (lambda (kw/links) (assoc kw (collect make-list (recompose links))))
+	      kw->links)))))
+#+end_src
+
+*** Upsert
+
+***
