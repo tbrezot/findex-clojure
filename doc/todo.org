@@ -1,0 +1,40 @@
+* TODO ideas
+1. entries can be stored into fixed-length buckets => we count on collisions to
+   hide association modification <-> keyword (modifications may be shared among
+   keywords in from the same bucket which number is unknown) and the number of
+   keywords (only the number of buckets is accessible).
+   => balance between expected number of collisions and bucket size need to be
+   found (no good compromise may be found) + can be combined with the next idea
+   to allow more collision than the bucket size (avoid tail padding cost)
+   Basically a tag is 16-byte long. We could decide to build buckets of size 4
+   to store collisions from a 8-byte long truncations (or less?) (=> estimate
+   probabilities).
+
+2. more than one entry per keyword/bucket -> we use non determinism to hide the
+   number of keywords.
+   - new entry can be created on collision => good side-effect: helps to reduce
+     pressure on hot insertion points
+   - new entry can be created on bucket overflow => good side-effect: helps with
+     previous idea
+   the important part here is that there is a max. number of duplicates allowed
+   so that clients deterministically know how many tokens to derive.
+   => bad side-effect: increase client->server communication bandwidth (but this
+   is actually not the limiting factor so it is okay)
+
+3. chains can be directly queried if the server is able to derive hashes. The
+   overhead is ~log N~ where ~N~ is the length of the chain (proportional to the
+   volume when the chain is compact). This overhead may be more acceptable than
+   a round-trip to the Entry Table.
+   => need to review token computation to make this compatible with the present
+   formalization
+
+4. differentiate DX-Enc requirements:
+   - Entry Table: integrate concurrency semantics since it is update-in-place.
+   - Chain Table: no need to integrate concurrency semantics
+
+5. better expose constraints
+   - no computation on the server (server = DB)
+   - no client synchronization (no stash, no lock...)
+   - search operation should be fast (=> to be validated)
+   - communication size need not be optimal
+   -
