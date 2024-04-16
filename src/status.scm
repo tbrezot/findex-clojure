@@ -11,13 +11,13 @@
   (make-status 'KO info))
 
 (define (until-success op update init)
-  (let loop ((stt (apply op init)))
-    (if (success? stt)
-	stt
-	(loop (apply op (update init (status-info stt)))))))
+  (let loop ((curr init))
+    (let* ((stt (op curr)))
+      (if (success? stt)
+	  curr
+	  (loop (update curr (status-info stt)))))))
 
-(define (unwrap-success op)
-  (let ((stt op))
-    (if (success? stt)
-	(status-info stt)
-	(error 'unwrap-success "memory error" (cons op stt)))))
+(define (unwrap-success stt)
+  (if (success? stt)
+      (status-info stt)
+      (error 'unwrap-success "memory error" stt)))

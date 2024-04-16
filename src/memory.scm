@@ -50,3 +50,10 @@
 			     "unknown operation"
 			     op)))))
       (atomically lock (apply op args)))))
+
+(define (make-batched-store)
+  (define memory (make-store))
+  (lambda args
+    (if (list? (car args))
+	(map (partial apply memory) args)
+	(apply memory args))))

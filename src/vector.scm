@@ -1,85 +1,106 @@
 (load "src/memory.scm")
 (load "src/status.scm")
 (load "src/utils.scm")
+(load "src/array.scm")
 
-(define (make-atomic-mutable-vector base-address memory)
-  (define cnt 0)
+(define-record-type header
+  (fields (mutable counter)
+	  (immutable array-ptr)))
 
-  (define cnt-address
-    (cons base-address 'header))
+;;; Creates a new vector with the following internal structure:
+;;;
+;;; +-----------+  +-------------
+;;; | CNT | PTR |->| V1 | V2 ...
+;;; +-----------+  +-------------
+;;;
+;;; Upon incrementation of the counter, a new header is created and stored using
+;;; the given write-header! function. It should return a status type containing
+;;; the current value of the header in case of failure.
+;;;
+;;; The given memory is used to store the backing array and the value of the
+;;; header pointer should never change.
+;;;
+;;; The following operations are exposed:
+;;; - (vector 'push! value) that stores value at the end of the array;
+;;; - (vector 'read)        that reads the current value of the array.
+(define (make-base-vector write-header! memory)
+  (define header (let* ((new-header (make-header 0 (random-address)))
+			(stt (write-header! new-header)))
+		   (if (success? stt) new-header (status-info stt))))
+  (define array (make-array (header-array-ptr header) memory))
 
-  (define val-address
-    (partial list base-address 'array))
+  (define (increment-counter! n)
+    (let ((update-header
+	   (lambda (_ current-header)
+	     (set! header current-header)
+	     (make-header (+ n (header-counter header))
+			  (header-array-ptr header)))))
+      (until-success write-header!
+		     update-header
+		     (update-header '()  header))))
 
-  ;; Increment the counter and cache the previous value.
-  (define (incr-cnt!)
-    (until-success (partial memory 'c&s! cnt-address)
-		   (lambda (init cur-val)
-		     (set! cnt cur-val)
-		     (list cur-val (1+ cur-val)))
-		   (list (if (zero? cnt) '() cnt)
-			 (1+ cnt))))
+  (define (write-value! value)
+    (until-success
+     (lambda (pos) (array 'write! `((,pos . ,value))))
+     (lambda (pos _) (1+ pos))
+     (header-counter header)))
 
-  ;; Store the given value at the given position.
-  (define (store-value! pos val)
-    (unwrap-success (memory 'write! (val-address pos) val)))
+  (define (base-vector-push! value)
+    (let ((new-header (increment-counter! 1)))
+      (unwrap-success
+       (car (array 'write! (list (cons (header-counter header) value)))))
+      (set! header new-header)))
 
-  ;; Push a new value to the end of the vector.
-  (define (push! value)
-    (incr-cnt!)
-    (store-value! cnt value)
-    (set! cnt (1+ cnt)))
+  (define (base-vector-read)
+    (map unwrap-success
+	 (array 'read (header-counter header))))
 
-  ;; Read the value stored at the given address.
-  (define fetch
-    (compose unwrap-success (partial memory 'read)))
-
-  ;; Read all values stored in the vector in two round-trips:
-  ;; - first fetch the current counter value and update the cache;
-  ;; - read all addresses derived from this counter.
-  (define (read)
-    (let ((new-cnt (fetch cnt-address)))
-      (set! cnt new-cnt)
-      (map (compose fetch val-address)
-	   (iter new-cnt))))
-
-  ;; Dispatch operations.
   (lambda (op . args)
     (case op
-      (push! (apply push! args))
-      (read  (apply read args))
-      (else (error 'atomic-vector
+      (read  (apply base-vector-read  args))
+      (push! (apply base-vector-push! args))
+      (else (error 'immutable-vector
 		   "unknown operation"
 		   op)))))
 
-(define (test-sequential)
-  (define n-repeat 10)
-  (define store  (make-store))
-  (define data (map (lambda (i) (random i))
-		    (iter 1 n-repeat)))
-  (define vector (make-atomic-mutable-vector 'vec store))
-  (for-each (lambda (v) (vector 'push! v))
-	    data)
-  (assert (equal? (vector 'read) data)))
+;;; Creates a new vector that uses the given memory. The header is written at
+;;; the given address and mutated upon incrementation while the backing array is
+;;; written to a random address.
+(define (make-mutable-vector address memory)
+  (define address-bytes (->byte-vector address))
+  (define write-header!
+    (let ((old-header '()))
+      (lambda (new-header)
+	(let ((stt (memory 'c&s! address-bytes old-header new-header)))
+	  (if (success? stt)
+	      (set! old-header new-header)
+	      (set! old-header (status-info stt)))
+	  stt))))
+  (make-base-vector write-header! memory))
 
-(define (test-parallel)
-  (define n-threads 10)
-  (define n-repeat  10)
-  (define store (make-store))
+;;; Assert values can correctly be written/read to/from the vector.
+(define (test-vector-parallel observe delay builder n-threads n-repeat)
+  (define address         (random-address))
+  (define memory          (make-batched-store))
+  (define build           (lambda (mem) (builder address mem)))
 
-  (define (worker id vector)
-    (for-each (lambda (repetition)
-		(let ((val (+ id (* repetition n-threads))))
-		  (vector 'push! val)))
-	      (iter n-repeat)))
+  (define (worker id memory)
+    (let ((vector (build memory)))
+      (for-each (lambda (repetition)
+		  (let ((val (+ id (* repetition n-threads))))
+		    (vector 'push! val)))
+		(iter n-repeat))))
 
-  (let* ((handles (map (lambda (id)
-			 (let ((vector (make-atomic-mutable-vector 'vec store)))
-			   (fork-thread (lambda () (worker id vector)))))
-		       (iter n-threads)))
-	 (res (map (lambda (handle) (thread-join handle))
-		   handles)))
-    (let* ((vector (make-atomic-mutable-vector 'vec store))
-	   (data   (vector 'read)))
+  (let* ((observed-memories '()))
+    (map thread-join
+	 (map (lambda (id)
+		(let ((memory (compose (observe memory) delay)))
+		  (set! observed-memories (cons (cons id memory)
+						observed-memories))
+		  (fork-thread (lambda () (worker id memory)))))
+	      (iter n-threads)))
+
+    (let ((data ((build memory) 'read)))
       (assert (equal? (sort < data)
-		      (iter (* n-threads n-repeat)))))))
+		      (iter (* n-threads n-repeat))))
+      observed-memories)))
