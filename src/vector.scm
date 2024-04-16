@@ -23,10 +23,8 @@
 ;;; The following operations are exposed:
 ;;; - (vector 'push! value) that stores value at the end of the array;
 ;;; - (vector 'read)        that reads the current value of the array.
-(define (make-base-vector write-header! memory)
-  (define header (let* ((new-header (make-header 0 (random-address)))
-			(stt (write-header! new-header)))
-		   (if (success? stt) new-header (status-info stt))))
+(define (make-base-vector address memory read-header write-header!)
+  (define header (make-header 0 address))
   (define array (make-array (header-array-ptr header) memory))
 
   (define (increment-counter! n)
@@ -39,19 +37,29 @@
 		     update-header
 		     (update-header '()  header))))
 
-  (define (write-value! value)
-    (until-success
-     (lambda (pos) (array 'write! `((,pos . ,value))))
-     (lambda (pos _) (1+ pos))
-     (header-counter header)))
+  (define (write-value! values)
+    (let ((n (length values)))
+      (until-success
+       (lambda (pos) (array 'write! (map cons
+					 (iter pos (+ pos n))
+					 values)))
+       (lambda (pos _) (+ pos (length values)))
+       (header-counter header))))
 
-  (define (base-vector-push! value)
-    (let ((new-header (increment-counter! 1)))
-      (unwrap-success
-       (car (array 'write! (list (cons (header-counter header) value)))))
+  (define (base-vector-push! values)
+    (let* ((n          (length values))
+	   (new-header (increment-counter! n))
+	   (pos-start  (header-counter header))
+	   (pos-stop   (+ pos-start n)))
+      (map unwrap-success
+	   (array 'write!
+	      (map cons
+		   (iter pos-start pos-stop)
+		   values)))
       (set! header new-header)))
 
   (define (base-vector-read)
+    (set! header (read-header))
     (map unwrap-success
 	 (array 'read (header-counter header))))
 
@@ -76,31 +84,39 @@
 	      (set! old-header new-header)
 	      (set! old-header (status-info stt)))
 	  stt))))
-  (make-base-vector write-header! memory))
+  (define (read-header)
+    (unwrap-success (memory 'read address-bytes)))
+  (make-base-vector address-bytes memory read-header write-header!))
 
 ;;; Assert values can correctly be written/read to/from the vector.
-(define (test-vector-parallel observe delay builder n-threads n-repeat)
+(define (test-vector-parallel observe delay builder n-threads n-items n-repeat)
   (define address         (random-address))
   (define memory          (make-batched-store))
   (define build           (lambda (mem) (builder address mem)))
 
   (define (worker id memory)
     (let ((vector (build memory)))
-      (for-each (lambda (repetition)
-		  (let ((val (+ id (* repetition n-threads))))
-		    (vector 'push! val)))
-		(iter n-repeat))))
+      (for-each (lambda (item)
+		  (let ((val (+ id (* item n-threads))))
+		    (vector 'push! (repeat n-repeat (lambda () val)))))
+		(iter n-items))))
 
   (let* ((observed-memories '()))
-    (map thread-join
-	 (map (lambda (id)
-		(let ((memory (compose (observe memory) delay)))
-		  (set! observed-memories (cons (cons id memory)
-						observed-memories))
-		  (fork-thread (lambda () (worker id memory)))))
-	      (iter n-threads)))
+    (time
+     (map thread-join
+	  (map (lambda (id)
+		 (let ((memory (observe memory)))
+		   (set! observed-memories
+			 (cons (cons id memory) observed-memories))
+		   (fork-thread (lambda ()
+				  (worker id (compose memory delay))))))
+	       (iter n-threads))))
 
-    (let ((data ((build memory) 'read)))
-      (assert (equal? (sort < data)
-		      (iter (* n-threads n-repeat))))
+    (let ((read-data (sort < ((build memory) 'read)))
+	  (expected-data
+	   (fold-left (partial merge <)
+		      '()
+		      (repeat n-repeat (lambda ()
+					 (iter (* n-threads n-items)))))))
+      (assert (equal? read-data expected-data))
       observed-memories)))

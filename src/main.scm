@@ -68,14 +68,15 @@
     (particularize (partial printf "  - worker ~a: ~a/~a\n"))
     (printf "\n")))
 
-(define (run-test test logger builder n-workers n-items)
+(define (run-test test logger builder n-workers n-items n-repeat)
   (let* ((rtt-max           150)
 	 (rtt-min           10)
-	 (observed-memories (time (test (partial observe logger)
-					(network-delay rtt-min rtt-max)
-					builder
-					n-workers
-					n-items))))
+	 (observed-memories (test (partial observe logger)
+				  (network-delay rtt-min rtt-max)
+				  builder
+				  n-workers
+				  n-items
+				  n-repeat)))
     (print-report n-workers
 		  n-items
 		  observed-memories)))

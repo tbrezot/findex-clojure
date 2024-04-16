@@ -47,3 +47,9 @@
 
 (define (random-address)
   (random (expt 2 128)))
+
+(define (repeat n f)
+  (let loop ((n n))
+    (if (zero? n)
+	'()
+	(cons (f) (repeat (- n 1) f)))))
